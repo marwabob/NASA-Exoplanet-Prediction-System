@@ -5,12 +5,13 @@ import joblib
 import os
 import shap
 import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 
 # ======================================================
 # Setup File Paths
 # ======================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-# Note: Keeping the directory name consistent with the model output
 MODELS_DIR = os.path.join(BASE_DIR, "models_v8_enriched")
 
 # ======================================================
@@ -18,180 +19,145 @@ MODELS_DIR = os.path.join(BASE_DIR, "models_v8_enriched")
 # ======================================================
 @st.cache_resource(show_spinner="📦 Loading model and components...")
 def load_model_components():
-    """Loads the Stacking Ensemble model, Scaler, and Feature list."""
+    """Loads the trained Stacking Ensemble model, Scaler, and Feature list."""
     try:
-        model_path = os.path.join(MODELS_DIR, "model_v8.joblib")
-        scaler_path = os.path.join(MODELS_DIR, "scaler_v8.joblib")
-        features_path = os.path.join(MODELS_DIR, "features_v8.joblib")
-
-        model = joblib.load(model_path)
-        scaler = joblib.load(scaler_path)
-        features = joblib.load(features_path)
-
+        model = joblib.load(os.path.join(MODELS_DIR, "model_v8.joblib"))
+        scaler = joblib.load(os.path.join(MODELS_DIR, "scaler_v8.joblib"))
+        features = joblib.load(os.path.join(MODELS_DIR, "features_v8.joblib"))
         return model, scaler, features
-
     except Exception as e:
-        # Changed the error message to remove "Generation 8" reference
-        st.error(
-            f"⚠️ Failed to load Advanced Ensemble model components: {e}\n"
-            f"Ensure files (model_v8.joblib, scaler_v8.joblib, features_v8.joblib) "
-            f"exist inside '{MODELS_DIR}'"
-        )
+        st.error(f"⚠️ Failed to load model: {e}")
         return None, None, None
 
 # ======================================================
 # SHAP Background Data
 # ======================================================
+# ✅ FIX: Added underscore before scaler to prevent Streamlit hashing error
 @st.cache_data(show_spinner="🔄 Preparing SHAP background data...")
 def load_shap_background(features, _scaler):
-    """Loads and preprocesses data for SHAP Explainer."""
+    """Loads and preprocesses background data for SHAP explanation."""
     data_path = os.path.join(BASE_DIR, "trail", "koi_dataset.csv")
     try:
-        # Load, filter for required features, drop N/A, and sample 500 rows for speed
         df = pd.read_csv(data_path)
-        df = df[features].dropna().head(500)
+        df = df[features].dropna().sample(300, random_state=42)
         X_scaled = _scaler.transform(df)
         return pd.DataFrame(X_scaled, columns=features)
     except Exception as e:
-        st.error(f"⚠️ Error loading SHAP background data: {e}. Check if 'koi_dataset.csv' is in the 'trail' folder.")
+        st.warning(f"⚠️ Could not load SHAP background: {e}")
         return None
 
 # ======================================================
-# Application Interface
+# Streamlit App Layout
 # ======================================================
-st.set_page_config(page_title="🚀 NASA Exoplanet Predictor", layout="centered")
-# Updated title to remove "Gen 8" reference
-st.title("🪐 Kepler Exoplanet Prediction System")
-st.caption("This system uses an advanced Stacking Ensemble model trained on 10 enriched features, including `koi_model_snr`.")
+st.set_page_config(page_title="🚀 NASA Exoplanet Predictor", layout="wide")
+st.title("🪐 NASA Exoplanet Prediction System")
+st.caption("Predict whether an exoplanet candidate is **False Positive**, **Candidate**, or **Confirmed** using an AI-powered ensemble model.")
 
-# Load model components
 model, scaler, FEATURES = load_model_components()
 
-if model is not None and scaler is not None and FEATURES is not None:
-    # Updated success message
-    st.success(f"✅ Advanced Ensemble model loaded successfully! Uses {len(FEATURES)} features.")
-
-    # Select input mode
-    input_mode = st.radio("Select data input method:", ("Manual", "Upload CSV File"))
-
+if model and scaler and FEATURES:
+    st.success(f"✅ Model successfully loaded! Using {len(FEATURES)} features.")
+    
+    # Input selection mode
+    input_mode = st.radio("Select Input Method:", ("Manual Input", "Upload CSV File"))
     X_input = None
 
-    if input_mode == "Manual":
-        st.subheader("🧮 Enter feature values for prediction:")
+    # Manual Input
+    if input_mode == "Manual Input":
+        st.subheader("🧮 Enter Feature Values:")
         user_input = {}
-        # Set default values for manual input
-        col1, col2 = st.columns(2)
-
-        for i, f in enumerate(FEATURES):
-            # Alternate columns for better layout
-            col = col1 if i < len(FEATURES) / 2 else col2
-
-            # Set a non-zero default for SNR as it's often critical
-            default_value = 0.0
-            if f == 'koi_model_snr':
-                default_value = 10.0
-
-            user_input[f] = col.number_input(f"🔹 {f}", value=default_value, help=f"Required value for feature: {f}")
-
+        cols = st.columns(2)
+        for i, feature in enumerate(FEATURES):
+            col = cols[i % 2]
+            default = 10.0 if "snr" in feature.lower() else 0.0
+            user_input[feature] = col.number_input(f"{feature}", value=default)
         X_input = pd.DataFrame([user_input])
 
+    # CSV Upload
     elif input_mode == "Upload CSV File":
-        uploaded_file = st.file_uploader("📂 Choose a CSV file containing features", type="csv")
-        if uploaded_file is not None:
-            try:
-                df_csv = pd.read_csv(uploaded_file)
-                missing_cols = [f for f in FEATURES if f not in df_csv.columns]
-
-                if missing_cols:
-                    st.error(f"⚠️ File is missing the following required columns: {missing_cols}")
-                    st.stop()
-
-                X_input = df_csv[FEATURES]
-
-            except Exception as e:
-                st.error(f"⚠️ Error reading the file: {e}")
-                X_input = None
+        uploaded_file = st.file_uploader("📂 Upload CSV with Feature Columns", type="csv")
+        if uploaded_file:
+            df_csv = pd.read_csv(uploaded_file)
+            missing = [f for f in FEATURES if f not in df_csv.columns]
+            if missing:
+                st.error(f"Missing required features: {missing}")
+                st.stop()
+            X_input = df_csv[FEATURES]
         else:
-             st.info("Please upload a CSV file to proceed with batch prediction.")
-             X_input = None
+            st.info("Please upload a CSV file to perform batch prediction.")
 
-
-    # Execute prediction if data is ready
-    if X_input is not None and st.button("🔍 Execute Prediction"):
+    # ======================================================
+    # Prediction and Visualization
+    # ======================================================
+    if X_input is not None and st.button("🔍 Predict"):
         try:
-            # Scale input data
+            # Scale features
             X_scaled = scaler.transform(X_input)
 
-            # Get predictions and probabilities
+            # Predict
             proba_all = model.predict_proba(X_scaled)
+            preds = np.argmax(proba_all, axis=1)
 
-            # Class names must match the model's output order (0, 1, 2)
             CLASS_NAMES = ['FALSE POSITIVE', 'CANDIDATE', 'CONFIRMED']
+            pred_labels = [CLASS_NAMES[i] for i in preds]
 
-            # Display results for each row
+            st.subheader("📊 Prediction Results")
+
             for i in range(len(X_input)):
-                st.write(f"### Prediction for Row {i+1}:")
+                st.write(f"### Row {i+1}")
+                st.metric("Predicted Class", pred_labels[i])
+                st.progress(float(np.max(proba_all[i])))
 
-                # Format probabilities display
-                proba_display = (
-                    f"FP: {proba_all[i][0]*100:.2f}% | "
-                    f"CAN: {proba_all[i][1]*100:.2f}% | "
-                    f"CONF: {proba_all[i][2]*100:.2f}%"
-                )
-                st.metric("🔢 Probabilities:", proba_display)
+                # Probability bar chart
+                fig, ax = plt.subplots(figsize=(5, 2))
+                sns.barplot(x=CLASS_NAMES, y=proba_all[i], palette="viridis", ax=ax)
+                ax.set_ylabel("Probability")
+                ax.set_title("Class Probability Distribution")
+                st.pyplot(fig)
+                st.divider()
 
-                predicted_class_index = np.argmax(proba_all[i])
-                predicted_class_name = CLASS_NAMES[predicted_class_index]
+            # ======================================================
+            # If batch mode: show confusion matrix and accuracy
+            # ======================================================
+            if len(X_input) > 1 and 'koi_disposition' in X_input.columns:
+                y_true = X_input['koi_disposition'].map({
+                    "FALSE POSITIVE": 0, "CANDIDATE": 1, "CONFIRMED": 2
+                })
+                acc = accuracy_score(y_true, preds)
+                st.success(f"✅ Overall Accuracy: {acc*100:.2f}%")
 
-                # Style the output for visibility
-                color = 'green' if predicted_class_name == 'CONFIRMED' else ('orange' if predicted_class_name == 'CANDIDATE' else 'red')
+                cm = confusion_matrix(y_true, preds)
+                fig, ax = plt.subplots()
+                sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", 
+                            xticklabels=CLASS_NAMES, yticklabels=CLASS_NAMES)
+                ax.set_xlabel("Predicted")
+                ax.set_ylabel("True")
+                ax.set_title("Confusion Matrix")
+                st.pyplot(fig)
 
-                st.markdown(f"**🧭 Predicted Result: <span style='color:{color};'>{predicted_class_name}</span>**", unsafe_allow_html=True)
+                report = classification_report(y_true, preds, target_names=CLASS_NAMES, output_dict=False)
+                st.text(report)
 
-                st.markdown("---")
+            # ======================================================
+            # SHAP Explanation (first row)
+            # ======================================================
+            with st.expander("🔬 SHAP Feature Importance (Row 1 Explanation)"):
+                shap_bg = load_shap_background(FEATURES, scaler)
+                if shap_bg is not None:
+                    explainer = shap.Explainer(model.predict_proba, shap_bg)
+                    shap_values = explainer(X_scaled[:1])
 
+                    predicted_idx = preds[0]
+                    predicted_label = CLASS_NAMES[predicted_idx]
+                    st.markdown(f"**Explaining prediction for class:** `{predicted_label}`")
 
-            # SHAP Analysis for the first row only (for efficiency)
-            if X_input is not None and len(X_input) > 0:
-                with st.expander("🔬 SHAP Analysis - Decision Explanation (Row 1)"):
-                    st.info("⚠️ SHAP value calculation may take a moment, especially on first run.")
-                    shap_bg = load_shap_background(FEATURES, scaler)
-
-                    if shap_bg is not None:
-                        # Only explain the first prediction
-                        X_input_scaled_shap = X_scaled[0:1]
-
-                        # Use model.predict_proba for multiclass explainer (better detail)
-                        explainer = shap.Explainer(model.predict_proba, shap_bg)
-
-                        # Calculate SHAP values
-                        shap_values_proba = explainer(X_input_scaled_shap)
-
-                        # Get the predicted class index for Row 1
-                        predicted_class_idx = np.argmax(proba_all[0])
-                        predicted_class_name = CLASS_NAMES[predicted_class_idx]
-
-                        st.write(f"**Explaining Prediction for: {predicted_class_name}**")
-
-                        # Plot the waterfall chart for the predicted class
-                        fig, ax = plt.subplots(figsize=(8, 5))
-                        shap.plots.waterfall(shap_values_proba[0, :, predicted_class_idx], show=False)
-                        st.pyplot(fig)
-
-                        st.markdown(
-                            """
-                            **Interpretation:**
-                            - **Red** features increase the probability of the predicted class.
-                            - **Blue** features decrease the probability of the predicted class.
-                            - The chart shows how each feature value moves the prediction from the base value (average prediction) to the final output.
-                            """
-                        )
-                    else:
-                        st.warning("SHAP analysis skipped due to background data loading error.")
+                    fig, ax = plt.subplots(figsize=(8, 5))
+                    shap.plots.waterfall(shap_values[0, :, predicted_idx], show=False)
+                    st.pyplot(fig)
+                    st.info("🔵 Blue: decreases likelihood | 🔴 Red: increases likelihood")
 
         except Exception as e:
-            st.error(f"⚠️ Error during prediction: {e}")
+            st.error(f"Prediction Error: {e}")
 
 else:
-    # Stop Streamlit execution if model loading failed
-    st.stop()
+    st.error("⚠️ Model could not be loaded. Please ensure model files exist in 'models_v8_enriched'.")
