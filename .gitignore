@@ -1,0 +1,24 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Logs and databases
+*.log
+*.sqlite3
+
+# Virtual environments
+env/
+venv/
+.tf_env/
+
+# System files
+.DS_Store
+Thumbs.db
+*.tmp
+
+# Streamlit
+.streamlit/
+
+# Ignore OS/system files
+AppData/
+NTUSER.DAT*
